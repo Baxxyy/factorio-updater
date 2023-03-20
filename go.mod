@@ -1,4 +1,4 @@
-module testing.com/factorio-updater
+module github.com/Baxxyy/factorio-updater
 
 go 1.20
 
