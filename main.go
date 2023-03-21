@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -20,6 +21,7 @@ import (
 	"golang.org/x/term"
 )
 
+// Global configs
 var (
 	fileConfig    = make(map[string]string)
 	runtimeConfig = make(map[string]any)
@@ -38,6 +40,41 @@ func checkErr(err error, errMsg string) {
 		verbosePrint(1, "err: %s\n", err)
 		fmt.Printf("%s\nAborting\n", errMsg)
 		os.Exit(1)
+	}
+}
+
+func cleanup(configFile *os.File, filename string, delete bool) {
+	defer configFile.Close()
+	if delete {
+		os.Remove(filename)
+	}
+}
+
+// Replace an existing file by creating a new file called <filename>.bak
+// and ensuring it is fully created before overwritng the old one. hopefully
+// should avoid problem of getting interupted during replacement
+func replaceExistingFile(data []byte, fileName string) {
+	tmpFile := fileName + ".bak"
+	newFile, err := os.OpenFile(tmpFile, os.O_TRUNC|os.O_WRONLY|os.O_CREATE, os.ModePerm)
+	if (err != nil) {
+		println("Couldn't write to directory")
+		cleanup(newFile, tmpFile, false)
+		return
+	}
+
+	bytesWritten, err := newFile.Write(data)
+	if err != nil || bytesWritten < len(data) {
+		fmt.Println("Error: couldn't make new file!")
+		verbosePrint(2, "Got err: %S\n", err)
+		cleanup(newFile, tmpFile, true)
+		return
+	}
+
+	err = os.Rename(tmpFile, fileName)
+	if err != nil {
+		println("Couldn't make overwrite current file")
+		cleanup(newFile, tmpFile, true)
+		return
 	}
 }
 
@@ -147,52 +184,19 @@ func setupConfigFromFile(configData []byte) {
 	fileConfig["wantedVersion"] = jsonConfig.WantedVersion
 	fileConfig["currentVersion"] = jsonConfig.CurrentVersion
 }
-func cleanup(configFile *os.File, delete bool) {
-	defer configFile.Close()
-	if delete {
-		configFilePath := runtimeConfig["configFile"].(string) + ".bak"
-		os.Remove(configFilePath)
-	}
-}
 
 func editFileConfig(changeKey string, newValue string) {
 	configFilepath := runtimeConfig["configFile"].(string)
-	configFileTmp := configFilepath + ".bak"
-	configFile, err := os.OpenFile(configFileTmp, os.O_TRUNC|os.O_WRONLY|os.O_CREATE, os.ModePerm)
-	if err != nil {
-		println("Can't write to config dir, please check permissions at: " + configFilepath)
-		cleanup(configFile, false)
-		return
-	}
+
 	if _, ok := fileConfig[changeKey]; !ok {
-		fmt.Printf("%s is not a valid key\n", changeKey)
-		cleanup(configFile, true)
+		fmt.Printf("%s is not a valid config setting!\n", changeKey)
 		return
 	}
+
 	fileConfig[changeKey] = newValue
 	configData, err := json.MarshalIndent(fileConfig, "", "\t")
-	if err != nil {
-		println("Can't convert config to json")
-		cleanup(configFile, true)
-		return
-	}
-
-	// Actually make new user config
-	bytesWritten, err := configFile.Write(configData)
-	if err != nil || bytesWritten < len(configData) {
-		fmt.Println("Error: couldn't make new config file!")
-		verbosePrint(2, "Got err: %S\n", err)
-		cleanup(configFile, true)
-		return
-	}
-
-	// Overwrite old config file with new one
-	err = os.Rename(configFileTmp, configFilepath)
-	if err != nil {
-		println("Wasn't able to write to config file, please check permissions")
-		cleanup(configFile, true)
-		return
-	}
+	checkErr(err, "Couldn't convert key to json")
+	replaceExistingFile(configData, configFilepath)
 }
 
 func init() {
@@ -557,11 +561,13 @@ func updateGivenMods(reqUrl string, updatedMods chan int, debugUrls chan string,
 	return
 }
 
+type modEntry struct {
+	Name    string `json:"name"`
+	Enabled bool   `json:"enabled"`
+}
+
 type modEntries struct {
-	Mods []struct {
-		Name    string `json:"name"`
-		Enabled bool   `json:"enabled"`
-	} `json:"mods"`
+	Mods []modEntry `json:"mods"`
 }
 
 func checkAndUpdateMods() {
@@ -707,6 +713,7 @@ func installNewMod(modName string, version string) {
 		res, err := grab.Get(modsDir, downloadUrl)
 		checkErr(err, "Couldn't fetch mod, please retry")
 		fmt.Printf("Downloaded %s to %s\n", modName, res.Filename)
+		addToModsJson(modName, true)
 		return
 	} else {
 		for _, release := range modInfo.Releases {
@@ -716,11 +723,76 @@ func installNewMod(modName string, version string) {
 				res, err := grab.Get(modsDir, downloadUrl)
 				checkErr(err, "Couldn't fetch mod, please retry")
 				fmt.Printf("Downloaded %s to %s\n", modName, res.Filename)
+				addToModsJson(modName, true)
 				return
 			}
 		}
 	}
 	fmt.Println("Couldn't find version number specified, please check it is valid")
+}
+
+func addToModsJson(modName string, enabled bool) {
+	modsFile := fileConfig["installDir"] + "/mods/mod-list.json"
+	modInfo, err := os.ReadFile(modsFile)
+	checkErr(err, "Couldn't read mod-list.json")
+	var modData modEntries
+	json.Unmarshal(modInfo, &modData)
+
+	for _, modItem := range modData.Mods {
+		if modItem.Name == modName {
+			return
+		}
+	}
+
+	newEntry := new(modEntry)
+	newEntry.Name = modName
+	newEntry.Enabled = enabled
+	newMods := append(modData.Mods, *newEntry)
+	sort.Slice(newMods, func(i, j int) bool {
+		return newMods[i].Name < newMods[j].Name
+	})
+	modData.Mods = newMods
+	newModData, err := json.MarshalIndent(modData,"", "  ")
+	checkErr(err, "Couldn't convert new mod data to json, mod-list.json not updated!")
+	replaceExistingFile(newModData, modsFile)
+}
+
+func disableMod(modName string) {
+	modsFile := fileConfig["installDir"] + "/mods/mod-list.json"
+	modInfo, err := os.ReadFile(modsFile)
+	checkErr(err, "Couldn't read mod-list.json")
+	var modData modEntries
+	json.Unmarshal(modInfo, &modData)
+disableModLoop:
+	for i, modItem := range modData.Mods {
+		if modItem.Enabled && modItem.Name == modName  {
+			modItem.Enabled = false
+			modData.Mods[i] = modItem
+			break disableModLoop
+		}
+	}
+	newModData, err := json.MarshalIndent(modData,"", "  ")
+	checkErr(err, "Couldn't convert new mod data to json, mod-list.json not updated!")
+	replaceExistingFile(newModData, modsFile)
+}
+
+func enableMod(modName string) {
+	modsFile := fileConfig["installDir"] + "/mods/mod-list.json"
+	modInfo, err := os.ReadFile(modsFile)
+	checkErr(err, "Couldn't read mod-list.json")
+	var modData modEntries
+	json.Unmarshal(modInfo, &modData)
+enableModLoop:
+	for i, modItem := range modData.Mods {
+		if !modItem.Enabled && modItem.Name == modName {
+			modItem.Enabled = true
+			modData.Mods[i] = modItem
+			break enableModLoop
+		}
+	}
+	newModData, err := json.MarshalIndent(modData,"", "  ")
+	checkErr(err, "Couldn't convert new mod data to json, mod-list.json not updated!")
+	replaceExistingFile(newModData, modsFile)
 }
 
 func main() {
@@ -767,11 +839,11 @@ ArgLoop:
 				break ArgLoop
 			}
 			modName := os.Args[argNum + 1]
-			if len(os.Args) < argNum + 2 {
-				installNewMod(modName, "")
-			} else {
+			if len(os.Args) > argNum + 2 {
 				modVer := os.Args[argNum + 2]
 				installNewMod(modName, modVer)
+			} else {
+				installNewMod(modName, "")
 			}
 			return
 		}
