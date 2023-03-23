@@ -12,13 +12,11 @@ import (
 	"os"
 	"os/exec"
 	"sort"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/cavaliergopher/grab/v3"
-	"golang.org/x/term"
 )
 
 // Global configs
@@ -27,240 +25,6 @@ var (
 	runtimeConfig = make(map[string]any)
 	modVersions   sync.Map
 )
-
-// Helpers
-func verbosePrint(verboseLevel int, msg string, args ...any) {
-	if runtimeConfig["verbose"].(int) >= verboseLevel {
-		fmt.Printf(msg, args...)
-	}
-}
-
-func checkErr(err error, errMsg string) {
-	if err != nil {
-		verbosePrint(1, "err: %s\n", err)
-		fmt.Printf("%s\nAborting\n", errMsg)
-		os.Exit(1)
-	}
-}
-
-func cleanup(configFile *os.File, filename string, delete bool) {
-	defer configFile.Close()
-	if delete {
-		os.Remove(filename)
-	}
-}
-
-// Replace an existing file by creating a new file called <filename>.bak
-// and ensuring it is fully created before overwritng the old one. hopefully
-// should avoid problem of getting interupted during replacement
-func replaceExistingFile(data []byte, fileName string) {
-	tmpFile := fileName + ".bak"
-	newFile, err := os.OpenFile(tmpFile, os.O_TRUNC|os.O_WRONLY|os.O_CREATE, os.ModePerm)
-	if (err != nil) {
-		println("Couldn't write to directory")
-		cleanup(newFile, tmpFile, false)
-		return
-	}
-
-	bytesWritten, err := newFile.Write(data)
-	if err != nil || bytesWritten < len(data) {
-		fmt.Println("Error: couldn't make new file!")
-		verbosePrint(2, "Got err: %S\n", err)
-		cleanup(newFile, tmpFile, true)
-		return
-	}
-
-	err = os.Rename(tmpFile, fileName)
-	if err != nil {
-		println("Couldn't make overwrite current file")
-		cleanup(newFile, tmpFile, true)
-		return
-	}
-}
-
-func firstTimeSetup(configFile *os.File) {
-	var username string
-	var token string
-
-	var haveToken string
-
-	fmt.Printf("Enter your factorio username/email: ")
-	_, err := fmt.Scanln(&username)
-	checkErr(err, "\nPlease enter a vaild username")
-
-	fmt.Printf("Do you have your factorio token? [Y/n] ")
-	_, err = fmt.Scanln(&haveToken)
-	checkErr(err, "\nPlease enter valid input")
-	if haveToken == "" || (haveToken[0] != 'Y' && haveToken[0] != 'y') {
-		fmt.Printf("Please enter your factorio password: ")
-		var password string
-		bytesPass, err := term.ReadPassword(int(os.Stdin.Fd()))
-		checkErr(err, "\nPlease enter valid input")
-		password = string(bytesPass)
-
-		token, err = getAuthToken(username, password)
-		checkErr(err, "Couldn't get auth token, please try again.")
-		println("\nGot factorio token")
-	} else {
-		fmt.Printf("Please enter your factorio token: ")
-		_, err = fmt.Scanln(&token)
-		checkErr(err, "\nPlease enter valid input")
-	}
-	fileConfig["username"] = username
-	fileConfig["token"] = token
-
-	fmt.Printf("Please enter the directory you have factorio installed (or want it installed in): ")
-	var installDirPath string
-	_, err = fmt.Scanln(&installDirPath)
-	checkErr(err, "\nPlease enter valid input")
-	if strings.HasPrefix(installDirPath, "~") {
-		installDirPath = strings.Replace(installDirPath, "~", os.Getenv("HOME"), 1)
-	}
-	installDirStat, err := os.Stat(installDirPath)
-	if err != nil {
-		fmt.Println("Attmepting to make new directory at:", installDirPath)
-		err = os.MkdirAll(installDirPath, os.ModePerm)
-		checkErr(err, "Couldn't make new directory")
-	} else if !installDirStat.IsDir() {
-		fmt.Println("A file already exists at ", installDirPath, ", please remove it")
-		os.Exit(0)
-	}
-
-	fileConfig["installDir"] = installDirPath
-
-	// Determine if a factorio installation exists, and version
-	changelogPath := installDirPath + "/data/changelog.txt"
-	_, err = os.Stat(changelogPath)
-	if err != nil {
-		fmt.Println("Can't find current factorio installation, setting current version to 0.0.0")
-		fileConfig["currentVersion"] = "0.0.0"
-	} else {
-		// Fairly awful hack based on version numbers in changelog
-		changelogFile, err := os.Open(changelogPath)
-		if err != nil {
-			fmt.Println("Can't find current factorio installation, setting current version to 0.0.0")
-			fileConfig["currentVersion"] = "0.0.0"
-			os.Exit(0)
-		}
-		version := make([]byte, 16)
-		_, err = changelogFile.ReadAt(version, 100)
-		checkErr(err, "Couldn't read changelog file")
-		version = bytes.Trim(version, "Version: \n")
-		fileConfig["currentVersion"] = string(version)
-		fmt.Println("Setting factorio version as: ", string(version))
-	}
-	fileConfig["wantedVersion"] = "stable"
-
-	fmt.Printf("Got user details as: %v\n", fileConfig)
-	configData, err := json.MarshalIndent(fileConfig, "", "\t")
-	checkErr(err, "Couldn't convert config to json")
-
-	// Actually make new user config
-	bytesWritten, err := configFile.Write(configData)
-	if err != nil || bytesWritten < len(configData) {
-		fmt.Println("Error, config file may be malformed!")
-		os.Exit(1)
-	}
-	fmt.Println("Setup complete! Further options can be configured using the cli")
-	return
-}
-
-type configStruct struct {
-	CurrentVersion string `json:"currentVersion"`
-	InstallDir     string `json:"installDir"`
-	Token          string `json:"token"`
-	Username       string `json:"username"`
-	WantedVersion  string `json:"wantedVersion"`
-}
-
-func setupConfigFromFile(configData []byte) {
-	var jsonConfig configStruct
-	err := json.Unmarshal(configData, &jsonConfig)
-	checkErr(err, "Couldn't decode config file data, is it malformed?")
-
-	fileConfig["token"] = jsonConfig.Token
-	fileConfig["username"] = jsonConfig.Username
-	fileConfig["installDir"] = jsonConfig.InstallDir
-	fileConfig["wantedVersion"] = jsonConfig.WantedVersion
-	fileConfig["currentVersion"] = jsonConfig.CurrentVersion
-}
-
-func editFileConfig(changeKey string, newValue string) {
-	configFilepath := runtimeConfig["configFile"].(string)
-
-	if _, ok := fileConfig[changeKey]; !ok {
-		fmt.Printf("%s is not a valid config setting!\n", changeKey)
-		return
-	}
-
-	fileConfig[changeKey] = newValue
-	configData, err := json.MarshalIndent(fileConfig, "", "\t")
-	checkErr(err, "Couldn't convert key to json")
-	replaceExistingFile(configData, configFilepath)
-}
-
-func init() {
-	// Parse command line args
-	for _, arg := range os.Args {
-		if arg == "-v" {
-			runtimeConfig["verbose"] = 4
-		} else if strings.HasPrefix(arg, "--verbose=") {
-			runtimeConfig["verbose"], _ = strconv.Atoi(arg[10:])
-		}
-	}
-	if _, ok := runtimeConfig["verbose"]; !ok {
-		runtimeConfig["verbose"] = 0
-	}
-
-	Client := http.Client{
-		Timeout: 30 * time.Second,
-	}
-	runtimeConfig["Client"] = Client
-
-	// Allow users to set custom config dir by setting enviroment
-	// variable 'FACCONFIGDIR' (needs a better name)
-	res, set := os.LookupEnv("FACCONFIGDIR")
-	var configDir string
-	if !set {
-		homeDir := os.Getenv("HOME")
-		configDir = homeDir + "/.config/fac-update"
-	} else {
-		configDir = res
-	}
-	configDirPresent, err := os.Stat(configDir)
-	if err != nil || !configDirPresent.IsDir() {
-		err = os.Mkdir(configDir, os.ModePerm)
-		if err != nil {
-			println("Could find config dir, please check permissions at " + configDir)
-			os.Exit(1)
-		}
-	}
-	configFilePath := configDir + "/config.json"
-	configFile, err := os.OpenFile(configFilePath, os.O_RDWR|os.O_CREATE, os.ModePerm)
-	defer configFile.Close()
-	checkErr(err, "Could open or create new config file, please check permissions at "+configDir)
-
-	configFileData := make([]byte, 512)
-	bytesRead, err := configFile.Read(configFileData)
-	if err != nil && err != io.EOF {
-		println("Couldn't read from config file, please check permissions at " + configFilePath)
-		verbosePrint(2, "Got error: %s", err)
-		os.Exit(1)
-	}
-	// Assume first time setup if no data was read, populate config map then write to config file
-	if bytesRead == 0 {
-		println("Running first time setup: ")
-		firstTimeSetup(configFile)
-		os.Exit(0)
-	} else {
-		// Trim unused buffer
-		configFileData = bytes.TrimRight(configFileData, "\x00")
-		setupConfigFromFile(configFileData)
-	}
-
-	runtimeConfig["configFile"] = configFilePath
-	verbosePrint(6, "Got config as: %v\n", fileConfig)
-}
 
 const baseUrl = "https://%sfactorio.com/%s"
 
@@ -325,35 +89,6 @@ func getAuthToken(username string, password string) (token string, err error) {
 	idx2 := bytes.Index(tokenResponse, []byte(`,`)) - 1
 	token = string(tokenResponse[idx1:idx2])
 	return token, nil
-}
-
-// Return True if newVer > curVer
-func checkVersionString(curVer string, newVer string) (newer bool) {
-	// Version string is of format: x.x.xx e.g. 1.1.12
-	// Assume 2.4.3 > 2.2.12 > 1.9.53
-	curVerStart := strings.IndexByte(curVer, '.')
-	newVerStart := strings.IndexByte(newVer, '.')
-	curVerBase, _ := strconv.Atoi(curVer[0:curVerStart])
-	newVerBase, _ := strconv.Atoi(curVer[0:newVerStart])
-	if newVerBase > curVerBase {
-		return true
-	}
-
-	curVerIdx := strings.LastIndexByte(curVer, '.')
-	newVerIdx := strings.LastIndexByte(newVer, '.')
-	curVerMid, _ := strconv.Atoi(curVer[curVerStart+1 : curVerIdx])
-	newVerMid, _ := strconv.Atoi(newVer[newVerStart+1 : newVerIdx])
-	if newVerMid > curVerMid {
-		return true
-	}
-
-	curVerEnd, _ := strconv.Atoi(curVer[curVerIdx+1:])
-	newVerEnd, _ := strconv.Atoi(newVer[newVerIdx+1:])
-	if newVerEnd > curVerEnd {
-		return true
-	}
-
-	return false
 }
 
 // Capable of updating or installing a server at $INSTALLDIR - set in config
@@ -510,7 +245,7 @@ type modDataResponse struct {
 }
 
 func updateGivenMods(reqUrl string, updatedMods chan int, debugUrls chan string,
-	debugErrs chan string, wg *sync.WaitGroup) {
+					 debugErrs chan string, wg *sync.WaitGroup) {
 	defer wg.Done()
 	Client := runtimeConfig["Client"].(http.Client)
 	debugUrls <- reqUrl
@@ -557,6 +292,7 @@ func updateGivenMods(reqUrl string, updatedMods chan int, debugUrls chan string,
 			fmt.Printf("Err: %s\n", err.Err())
 		}
 	}
+	updatedMods <- len(responses)
 
 	return
 }
@@ -588,14 +324,7 @@ func checkAndUpdateMods() {
 		return
 	}
 
-	modsListFilepath := modsFilepath + "/mod-list.json"
-	modInfo, err := os.ReadFile(modsListFilepath)
-	if err != nil {
-		println("Couldn't find mod-list.json at: " + modsListFilepath + "\nPlease check it is present or run the server for the first time")
-		return
-	}
-	var modData modEntries
-	json.Unmarshal(modInfo, &modData)
+	modData := getMods()
 
 	var enabledMods []string
 	for _, modItem := range modData.Mods {
@@ -616,8 +345,9 @@ func checkAndUpdateMods() {
 	}
 	modApiBaseUrl := fmt.Sprintf(baseUrl, "mods.", "api/mods?namelist=")
 	modApiReqUrl := modApiBaseUrl
+	const maxReqInThread = 20
 	// 'Funny' go math casting - why must it always be float64? are we lua?
-	requests := int(math.Ceil(float64(len(enabledMods)) / 20))
+	requests := int(math.Ceil(float64(len(enabledMods)) / maxReqInThread))
 	verbosePrint(4, "Will send %d requests\n", requests)
 	buildCurrentModVersions()
 	urls := make(chan string, requests)
@@ -626,7 +356,7 @@ func checkAndUpdateMods() {
 	var DoneUpdating sync.WaitGroup
 	for i, modName := range enabledMods {
 		modApiReqUrl += (modName + ",")
-		if math.Mod(float64((i+1)), 20) == 0 {
+		if math.Mod(float64((i+1)), maxReqInThread) == 0 {
 			DoneUpdating.Add(1)
 			verbosePrint(6, "Added 1 to wait group\n")
 			go updateGivenMods(modApiReqUrl, updates, urls, errors, &DoneUpdating)
@@ -635,7 +365,7 @@ func checkAndUpdateMods() {
 		}
 	}
 	// cleanup remaing mods that didn't fit nicely - probably a neater way
-	if math.Mod(float64(len(enabledMods)), 20) != 0 {
+	if math.Mod(float64(len(enabledMods)), maxReqInThread) != 0 {
 		DoneUpdating.Add(1)
 		go updateGivenMods(modApiReqUrl, updates, urls, errors, &DoneUpdating)
 		verbosePrint(6, "Started cleanup update requester\n")
@@ -684,7 +414,6 @@ type modDetails struct {
 }
 
 func installNewMod(modName string, version string) {
-	checkAndUpdateMods()
 	Client := runtimeConfig["Client"].(http.Client)
 	modUrl := fmt.Sprintf(baseUrl, "mods.", "api/mods/" + modName)
 	res, err := Client.Get(modUrl)
@@ -733,10 +462,7 @@ func installNewMod(modName string, version string) {
 
 func addToModsJson(modName string, enabled bool) {
 	modsFile := fileConfig["installDir"] + "/mods/mod-list.json"
-	modInfo, err := os.ReadFile(modsFile)
-	checkErr(err, "Couldn't read mod-list.json")
-	var modData modEntries
-	json.Unmarshal(modInfo, &modData)
+	modData := getMods()
 
 	for _, modItem := range modData.Mods {
 		if modItem.Name == modName {
