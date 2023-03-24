@@ -88,7 +88,6 @@ func firstTimeSetup(configFile *os.File) {
 	}
 	fileConfig["wantedVersion"] = "stable"
 
-	fmt.Printf("Got user details as: %v\n", fileConfig)
 	configData, err := json.MarshalIndent(fileConfig, "", "\t")
 	checkErr(err, "Couldn't convert config to json")
 
