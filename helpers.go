@@ -23,8 +23,7 @@ func cleanup(configFile *os.File, filename string, delete bool) {
 	}
 }
 
-func getMods()(mods modEntries) {
-	modsFile := fileConfig["installDir"] + "/mods/mod-list.json"
+func getMods(modsFile string)(mods modEntries) {
 	modInfo, err := os.ReadFile(modsFile)
 	checkErr(err, "Couldn't read mod-list.json")
 	var modData modEntries

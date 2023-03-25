@@ -39,4 +39,3 @@ The current functionality is implememnted:
 - Install and update mods.
 - Pin a specific mod version to avoid it auto updating.
 
-

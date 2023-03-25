@@ -23,16 +23,21 @@ import (
 var (
 	fileConfig    = make(map[string]string)
 	runtimeConfig = make(map[string]any)
+
 	modVersions   sync.Map
+	modVersionsFilled = false
 )
 
 const baseUrl = "https://%sfactorio.com/%s"
 
 func buildCurrentModVersions() {
+	if modVersionsFilled {
+		return
+	}
 	modsFilePath := fileConfig["installDir"] + "/mods"
 	filesInModDir, err := os.ReadDir(modsFilePath)
 	if err != nil {
-		println("Couldn't get current mod versions, continuing with empty mods list")
+		println("Couldn't get current mod versions")
 		verbosePrint(1, "Got err while reading mod directory: %s\n", err)
 		return
 	}
@@ -55,6 +60,7 @@ func buildCurrentModVersions() {
 			}
 		}
 	}
+	modVersionsFilled = true
 }
 
 // Get token needed for downloading mods
@@ -271,18 +277,22 @@ func updateGivenMods(reqUrl string, updatedMods chan int, debugUrls chan string,
 	modsDir := fileConfig["installDir"] + "/mods"
 	modApiBaseUrl := fmt.Sprintf(baseUrl, "mods.", "")
 	c := grab.NewClient()
-
+	updates := 0
 	var requests []*grab.Request
 	for _, modItem := range modData.Results {
-		currentVersion, _ := modVersions.Load(modItem.Name)
+		currentVersion, present := modVersions.Load(modItem.Name)
+		if (!present) {
+			currentVersion = "0.0.0"
+		}
 		newVersion := modItem.Releases[len(modItem.Releases)-1]
 		if checkVersionString(currentVersion.(string), newVersion.Version) {
-			authenticatedUrl := fmt.Sprintf(modApiBaseUrl+newVersion.DownloadURL+"?username=%s&token=%s",
-				fileConfig["username"], fileConfig["token"])
+			authenticatedUrl := fmt.Sprintf(modApiBaseUrl + "%s?username=%s&token=%s",
+				newVersion.DownloadURL, fileConfig["username"], fileConfig["token"])
 			req, _ := grab.NewRequest(modsDir, authenticatedUrl)
 			requests = append(requests, req)
 			modVersions.Store(modItem.Name, newVersion.Version)
-			verbosePrint(1, "Updating %s from ver %s to %s\n", modItem.Name, currentVersion.(string), newVersion.Version)
+			updates += 1
+			verbosePrint(6, "Updating %s from ver %s to %s\n", modItem.Name, currentVersion.(string), newVersion.Version)
 		}
 	}
 	responses := c.DoBatch(5, requests...)
@@ -292,7 +302,7 @@ func updateGivenMods(reqUrl string, updatedMods chan int, debugUrls chan string,
 			fmt.Printf("Err: %s\n", err.Err())
 		}
 	}
-	updatedMods <- len(responses)
+	updatedMods <- updates
 
 	return
 }
@@ -305,41 +315,8 @@ type modEntry struct {
 type modEntries struct {
 	Mods []modEntry `json:"mods"`
 }
-
-func checkAndUpdateMods() {
-	modsFilepath := fileConfig["installDir"] + "/mods"
-	modsDir, err := os.Stat(modsFilepath)
-	if err != nil {
-		verbosePrint(1, "%s\n", err)
-		println("Can't find " + fileConfig["installDir"] + "/mods, attempting to create it and exit")
-		if err = os.Mkdir(modsFilepath, os.ModePerm); err != nil {
-			println("Couldn't make new mods directory, check permissions or if " + fileConfig["installDir"] + " exists")
-			verbosePrint(1, "%s\n", err)
-		}
-		return
-	}
-
-	if !modsDir.IsDir() {
-		println(modsFilepath + " is not a directory")
-		return
-	}
-
-	modData := getMods()
-
-	var enabledMods []string
-	for _, modItem := range modData.Mods {
-		verbosePrint(10, "Checking mod %s, enabled is %t\n", modItem.Name, modItem.Enabled)
-
-		if !modItem.Enabled {
-			continue
-		}
-		if modItem.Name == "base" {
-			continue
-		}
-		verbosePrint(10, "Adding mod %s to enabled mods\n", modItem.Name)
-		enabledMods = append(enabledMods, modItem.Name)
-	}
-	if len(enabledMods) == 0 {
+func downloadMods(modList []string) {
+	if len(modList) == 0 {
 		verbosePrint(1, "Couldn't find any mods\n")
 		return
 	}
@@ -347,14 +324,14 @@ func checkAndUpdateMods() {
 	modApiReqUrl := modApiBaseUrl
 	const maxReqInThread = 20
 	// 'Funny' go math casting - why must it always be float64? are we lua?
-	requests := int(math.Ceil(float64(len(enabledMods)) / maxReqInThread))
+	requests := int(math.Ceil(float64(len(modList)) / maxReqInThread))
 	verbosePrint(4, "Will send %d requests\n", requests)
 	buildCurrentModVersions()
 	urls := make(chan string, requests)
 	errors := make(chan string, requests)
 	updates := make(chan int, requests)
 	var DoneUpdating sync.WaitGroup
-	for i, modName := range enabledMods {
+	for i, modName := range modList {
 		modApiReqUrl += (modName + ",")
 		if math.Mod(float64((i+1)), maxReqInThread) == 0 {
 			DoneUpdating.Add(1)
@@ -365,7 +342,7 @@ func checkAndUpdateMods() {
 		}
 	}
 	// cleanup remaing mods that didn't fit nicely - probably a neater way
-	if math.Mod(float64(len(enabledMods)), maxReqInThread) != 0 {
+	if math.Mod(float64(len(modList)), maxReqInThread) != 0 {
 		DoneUpdating.Add(1)
 		go updateGivenMods(modApiReqUrl, updates, urls, errors, &DoneUpdating)
 		verbosePrint(6, "Started cleanup update requester\n")
@@ -385,10 +362,48 @@ func checkAndUpdateMods() {
 
 	totalUpdates := 0
 	for update := range updates {
+		fmt.Printf("Update was: %d\n", update)
 		totalUpdates += update
 	}
 
 	fmt.Printf("Updated %d mods\n", totalUpdates)
+}
+func checkAndUpdateMods() {
+	modsFilepath := fileConfig["installDir"] + "/mods"
+	modsDir, err := os.Stat(modsFilepath)
+	if err != nil {
+		verbosePrint(1, "%s\n", err)
+		println("Can't find " + fileConfig["installDir"] + "/mods, attempting to create it and exit")
+		if err = os.Mkdir(modsFilepath, os.ModePerm); err != nil {
+			println("Couldn't make new mods directory, check permissions or if " + fileConfig["installDir"] + " exists")
+			verbosePrint(1, "%s\n", err)
+		}
+		return
+	}
+
+	if !modsDir.IsDir() {
+		println(modsFilepath + " is not a directory")
+		return
+	}
+	modsFile := fileConfig["installDir"] + "/mods/mod-list.json"
+	modData := getMods(modsFile)
+
+	var enabledMods []string
+	for _, modItem := range modData.Mods {
+		verbosePrint(10, "Checking mod %s, enabled is %t\n", modItem.Name, modItem.Enabled)
+
+		if !modItem.Enabled {
+			continue
+		}
+		if modItem.Name == "base" {
+			continue
+		}
+		verbosePrint(10, "Adding mod %s to enabled mods\n", modItem.Name)
+		enabledMods = append(enabledMods, modItem.Name)
+	}
+
+	downloadMods(enabledMods)
+
 	return
 }
 
@@ -462,7 +477,7 @@ func installNewMod(modName string, version string) {
 
 func addToModsJson(modName string, enabled bool) {
 	modsFile := fileConfig["installDir"] + "/mods/mod-list.json"
-	modData := getMods()
+	modData := getMods(modsFile)
 
 	for _, modItem := range modData.Mods {
 		if modItem.Name == modName {
@@ -521,6 +536,45 @@ enableModLoop:
 	replaceExistingFile(newModData, modsFile)
 }
 
+func installModsFromFile(modFile string) {
+	_, err := os.Stat(modFile)
+	checkErr(err, "Couldn't find file, check path")
+
+	// Try to deal with people giving path to dir instead of file
+	if (!strings.HasSuffix(modFile, ".json")) {
+		modFile += "/mod-list.json"
+	}
+	modData := getMods(modFile)
+
+	buildCurrentModVersions()
+	// TODO: Move this to use modVersions / call to buildCurrentModVersions,
+	// add a check to avoid calls twice incuring lots of cost.
+	existingMods := map[string]struct{}{}
+
+	modVersions.Range(func(key, value any) bool {
+		existingMods[key.(string)] = struct{}{}
+		return true
+	})
+
+	fmt.Printf("Existing mods: %v\n\n", existingMods)
+	fmt.Printf("Mods to install: %v\n\n", modData.Mods)
+	var modsToDownload []string
+	for _, mod := range modData.Mods {
+		if mod.Name == "base" {continue}
+		if _, ok := existingMods[mod.Name]; !ok {
+			modsToDownload = append(modsToDownload, mod.Name)
+		}
+	}
+
+	fmt.Printf("modsToDownload: %v\n", modsToDownload)
+
+	downloadMods(modsToDownload)
+	// Enable all mods for now, perhaps should be an option?
+	for _, modName := range modsToDownload {
+		addToModsJson(modName, true)
+	}
+}
+
 func main() {
 ArgLoop:
 	for argNum, arg := range os.Args {
@@ -565,11 +619,19 @@ ArgLoop:
 				break ArgLoop
 			}
 			modName := os.Args[argNum + 1]
-			if len(os.Args) > argNum + 2 {
-				modVer := os.Args[argNum + 2]
-				installNewMod(modName, modVer)
+			if modName == "modlist" {
+				if len(os.Args) < argNum + 2 {
+					break ArgLoop
+				}
+				modPath := os.Args[argNum + 2]
+				installModsFromFile(modPath)
 			} else {
-				installNewMod(modName, "")
+				if len(os.Args) > argNum + 2 {
+					modVer := os.Args[argNum + 2]
+					installNewMod(modName, modVer)
+				} else {
+					installNewMod(modName, "")
+				}
 			}
 			return
 		}
@@ -579,7 +641,8 @@ ArgLoop:
 			fmt.Printf("Options:\n")
 			fmt.Printf("\t update server\t\t  - Update factorio server version\n")
 			fmt.Printf("\t update mods\t\t  - Update factorio mods versions\n\n")
-			fmt.Printf("\t install <name> <ver>\t  - Download a mod, takes optional version\n\n")
+			fmt.Printf("\t install <name> <ver>\t  - Download a mod, takes optional version\n")
+			fmt.Printf("\t install modlist <path>\t  - Download all mods from a mod-list.sjon\n\n")
 			fmt.Printf("\t config list\t\t  - List current config settings\n")
 			fmt.Printf("\t config set <key> <value> - Set a config variable\n")
 			return
