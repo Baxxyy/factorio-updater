@@ -36,6 +36,6 @@ Setup complete! Further options can be configured using the cli
 The current functionality is implememnted:
 
 - Install and update a headless factorio server, tracking experimental or stable branch.
-- Install and update mods.
-- Pin a specific mod version to avoid it auto updating.
-
+- Update existing mods
+- Install a specific mod from the mod portal
+- Install and enable mods from a mod-list.json
